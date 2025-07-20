@@ -7,7 +7,7 @@ Usage: python tmux_scoreboard_parser.py <session:window.pane>
 import re
 import subprocess
 import sys
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
 
 def capture_tmux_pane(pane_target: str) -> str:
@@ -43,12 +43,9 @@ def parse_scoreboard(content: str) -> Dict:
     """Parse the scoreboard content to extract player data."""
     lines = content.split("\n")
 
-    # Find the title and day
-    title_line = None
+    # Find the day number
     day_number = None
     for line in lines:
-        if "dailyhex!" in line:
-            title_line = line
         if "day" in line and "·" in line:
             day_match = re.search(r"day (\d+)", line)
             if day_match:
