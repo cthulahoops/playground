@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 Parse tmux pane content to extract dailyhex game scoreboard with player details.
-Usage: python tmux_scoreboard_parser.py <session:window.pane>
+Usage: python hex_scoreboard_parser.py <session:window.pane>
 """
 
+import argparse
+import json
 import re
 import subprocess
 import sys
@@ -25,10 +27,15 @@ def capture_tmux_pane(pane_target: str) -> str:
         sys.exit(1)
 
 
-def parse_ansi_colors(text: str) -> List[str]:
+def parse_ansi_colors(text: str, background_only: bool = True) -> List[str]:
     """Extract hex colors from ANSI escape sequences."""
-    # Pattern for RGB color codes: \x1b[48;2;R;G;B m
-    pattern = r"\x1b\[48;2;(\d+);(\d+);(\d+)m"
+    if background_only:
+        # Pattern for RGB background color codes: \x1b[48;2;R;G;B m
+        pattern = r"\x1b\[48;2;(\d+);(\d+);(\d+)m"
+    else:
+        # Pattern for RGB foreground color codes: \x1b[38;2;R;G;B m
+        pattern = r"\x1b\[38;2;(\d+);(\d+);(\d+)m"
+
     matches = re.findall(pattern, text)
 
     hex_colors = []
@@ -43,13 +50,20 @@ def parse_scoreboard(content: str) -> Dict:
     """Parse the scoreboard content to extract player data."""
     lines = content.split("\n")
 
-    # Find the day number
+    # Find the day number and solution from dailyhex title color
     day_number = None
+    solution = None
     for line in lines:
-        if "day" in line and "·" in line:
+        if "day" in line and ("·" in line or ">" in line):
             day_match = re.search(r"day (\d+)", line)
             if day_match:
                 day_number = day_match.group(1)
+
+        # Extract solution from dailyhex title color (foreground color)
+        if "dailyhex!" in line:
+            colors = parse_ansi_colors(line, background_only=False)
+            if colors:
+                solution = colors[0]  # The title color is the solution
 
     # Find player data lines (lines with names and moves)
     players = {}
@@ -80,7 +94,12 @@ def parse_scoreboard(content: str) -> Dict:
 
             players[player_name] = {"moves": moves, "guesses": colors}
 
-    return {"title": "dailyhex!", "day": day_number, "players": players}
+    return {
+        "title": "dailyhex!",
+        "day": day_number,
+        "solution": solution,
+        "players": players,
+    }
 
 
 def hex_to_ansi_bg(hex_color: str) -> str:
@@ -146,13 +165,9 @@ def format_colored_hex(guess: str, solution: str) -> str:
     return "#" + "".join(colored_chars)
 
 
-def find_solution(players: Dict) -> str:
-    """Find the solution by looking for the last guess of any player (should be the target)."""
-    # The solution is typically the last guess made by any player
-    for player_data in players.values():
-        if player_data["guesses"]:
-            return player_data["guesses"][-1]  # Return last guess
-    return None
+def find_solution(data: Dict) -> str:
+    """Get the solution from the parsed data."""
+    return data.get("solution")
 
 
 def format_output(data: Dict) -> str:
@@ -162,22 +177,17 @@ def format_output(data: Dict) -> str:
     if data["day"]:
         output.append(f"Day: {data['day']}")
 
-    # Find the solution
-    solution = find_solution(data["players"])
+    solution = find_solution(data)
     if solution:
         output.append(f"Solution: {solution}")
     output.append("")
 
-    # Sort players by number of moves (ascending)
-    sorted_players = sorted(data["players"].items(), key=lambda x: x[1]["moves"])
-
-    for player_name, player_data in sorted_players:
+    for player_name, player_data in data["players"].items():
         output.append(f"{player_name} ({player_data['moves']} moves):")
         for i, color in enumerate(player_data["guesses"], 1):
-            # Create colored block with ANSI escape sequences
-            color_block = f"{hex_to_ansi_bg(color)}  \x1b[0m"  # Two spaces with background color + reset
+            # Two spaces with background color + reset
+            color_block = f"{hex_to_ansi_bg(color)}  \x1b[0m"
 
-            # Create Wordle-style colored hex code if we have a solution
             if solution:
                 colored_hex = format_colored_hex(color, solution)
             else:
@@ -190,22 +200,26 @@ def format_output(data: Dict) -> str:
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python tmux_scoreboard_parser.py <session:window.pane>")
-        print("Example: python tmux_scoreboard_parser.py main:1.1")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Parse tmux pane content to extract dailyhex game scoreboard"
+    )
+    parser.add_argument("pane_target", help="Tmux pane target (e.g., main:1.1)")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format (without Wordle evaluations)",
+    )
 
-    pane_target = sys.argv[1]
+    args = parser.parse_args()
 
-    # Capture tmux pane content
-    content = capture_tmux_pane(pane_target)
-
-    # Parse the scoreboard
+    content = capture_tmux_pane(args.pane_target)
     data = parse_scoreboard(content)
 
-    # Format and print output
-    output = format_output(data)
-    print(output)
+    if args.json:
+        print(json.dumps(data, indent=2))
+    else:
+        output = format_output(data)
+        print(output)
 
 
 if __name__ == "__main__":
