@@ -6,10 +6,79 @@ Usage: python hex_scoreboard_parser.py <session:window.pane>
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
-from typing import List, Dict
+from typing import List, Dict, Optional
+
+
+def find_dailyhex_kitty_window() -> Optional[int]:
+    """Find kitty window containing dailyhex content."""
+    kitty_socket = os.environ.get("KITTY_LISTEN_ON")
+    if not kitty_socket:
+        return None
+
+    try:
+        # Get list of all windows
+        result = subprocess.run(
+            ["kitty", "@", "--to", kitty_socket, "ls"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        import json as json_mod
+
+        windows_data = json_mod.loads(result.stdout)
+
+        # Search through all windows for one with SSH to hex
+        for os_window in windows_data:
+            for tab in os_window.get("tabs", []):
+                for window in tab.get("windows", []):
+                    window_id = window["id"]
+
+                    # Check if this window has an SSH connection to hex
+                    for process in window.get("foreground_processes", []):
+                        cmdline = process.get("cmdline", [])
+                        if (
+                            len(cmdline) >= 2
+                            and cmdline[0] == "ssh"
+                            and cmdline[1] == "hex"
+                        ):
+                            return window_id
+
+        return None
+    except (subprocess.CalledProcessError, json_mod.JSONDecodeError):
+        return None
+
+
+def capture_kitty_window(window_id: int) -> str:
+    """Capture kitty window content with ANSI escape sequences."""
+    kitty_socket = os.environ.get("KITTY_LISTEN_ON")
+    if not kitty_socket:
+        raise RuntimeError("KITTY_LISTEN_ON not set")
+
+    try:
+        result = subprocess.run(
+            [
+                "kitty",
+                "@",
+                "--to",
+                kitty_socket,
+                "get-text",
+                "--ansi",
+                "--match",
+                f"id:{window_id}",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        print(f"Error capturing kitty window: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def capture_tmux_pane(pane_target: str) -> str:
@@ -27,14 +96,84 @@ def capture_tmux_pane(pane_target: str) -> str:
         sys.exit(1)
 
 
+def find_dailyhex_tmux_pane() -> Optional[str]:
+    """Find tmux pane containing dailyhex content."""
+    try:
+        # Get list of all panes with their commands
+        result = subprocess.run(
+            [
+                "tmux",
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}:#{window_index}.#{pane_index} #{pane_current_command}",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Look for panes running ssh
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            parts = line.split(" ", 1)
+            if len(parts) >= 2:
+                pane_target = parts[0]
+                command = parts[1]
+
+                if command == "ssh":
+                    # Test if this pane contains dailyhex content
+                    try:
+                        test_result = subprocess.run(
+                            ["tmux", "capture-pane", "-t", pane_target, "-e", "-p"],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        )
+
+                        if "dailyhex!" in test_result.stdout:
+                            return pane_target
+                    except subprocess.CalledProcessError:
+                        continue
+
+        return None
+    except subprocess.CalledProcessError:
+        return None
+
+
+def capture_content(target: Optional[str] = None) -> str:
+    """Capture content from kitty or tmux, auto-detecting the best source."""
+    # First try kitty if available
+    if os.environ.get("KITTY_LISTEN_ON"):
+        window_id = find_dailyhex_kitty_window()
+        if window_id:
+            return capture_kitty_window(window_id)
+
+    # Try tmux auto-detection if we're in tmux
+    if os.environ.get("TMUX"):
+        pane_target = find_dailyhex_tmux_pane()
+        if pane_target:
+            return capture_tmux_pane(pane_target)
+
+    # Fall back to tmux with explicit target
+    if target:
+        return capture_tmux_pane(target)
+
+    print("Error: Could not find dailyhex content in kitty or tmux", file=sys.stderr)
+    sys.exit(1)
+
+
 def parse_ansi_colors(text: str, background_only: bool = True) -> List[str]:
     """Extract hex colors from ANSI escape sequences."""
     if background_only:
-        # Pattern for RGB background color codes: \x1b[48;2;R;G;B m
-        pattern = r"\x1b\[48;2;(\d+);(\d+);(\d+)m"
+        # Pattern for RGB background color codes: supports both ; and : separators
+        # \x1b[48;2;R;G;B m (tmux) and \x1b[48:2:R:G:B m (kitty)
+        pattern = r"\x1b\[48[;:]2[;:](\d+)[;:](\d+)[;:](\d+)m"
     else:
-        # Pattern for RGB foreground color codes: \x1b[38;2;R;G;B m
-        pattern = r"\x1b\[38;2;(\d+);(\d+);(\d+)m"
+        # Pattern for RGB foreground color codes: supports both ; and : separators
+        # \x1b[38;2;R;G;B m (tmux) and \x1b[38:2:R:G:B m (kitty)
+        pattern = r"\x1b\[38[;:]2[;:](\d+)[;:](\d+)[;:](\d+)m"
 
     matches = re.findall(pattern, text)
 
@@ -201,9 +340,13 @@ def format_output(data: Dict) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Parse tmux pane content to extract dailyhex game scoreboard"
+        description="Parse terminal content to extract dailyhex game scoreboard (auto-detects kitty or tmux)"
     )
-    parser.add_argument("pane_target", help="Tmux pane target (e.g., main:1.1)")
+    parser.add_argument(
+        "pane_target",
+        nargs="?",
+        help="Tmux pane target (e.g., main:1.1) - only needed if not using kitty or auto-detection fails",
+    )
     parser.add_argument(
         "--json",
         action="store_true",
@@ -212,7 +355,7 @@ def main():
 
     args = parser.parse_args()
 
-    content = capture_tmux_pane(args.pane_target)
+    content = capture_content(args.pane_target)
     data = parse_scoreboard(content)
 
     if args.json:
