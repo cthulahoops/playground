@@ -173,7 +173,7 @@ def parse_ansi_colors(text: str, background_only: bool = True) -> List[str]:
     else:
         # Pattern for RGB foreground color codes: supports both ; and : separators
         # \x1b[38;2;R;G;B m (tmux) and \x1b[38:2:R:G:B m (kitty)
-        pattern = r"\x1b\[38[;:]2[;:](\d+)[;:](\d+)[;:](\d+)m"
+        pattern = r"\x1b\[(?:\d+;)*38[;:]2[;:](\d+)[;:](\d+)[;:](\d+)m"
 
     matches = re.findall(pattern, text)
 
