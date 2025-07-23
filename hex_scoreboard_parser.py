@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Parse tmux pane content to extract dailyhex game scoreboard with player details.
-Usage: python hex_scoreboard_parser.py <session:window.pane>
+Parse kitty window or tmux pane content to extract dailyhex game scoreboard with player details.
+Auto-detects and prioritizes kitty, falls back to tmux if needed.
+Usage: python hex_scoreboard_parser.py [<session:window.pane>]
 """
 
 import argparse
