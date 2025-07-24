@@ -256,17 +256,23 @@ def hex_to_ansi_bg(hex_color: str) -> str:
     return f"\x1b[48;2;{r};{g};{b}m"
 
 
-def evaluate_guess(guess: str, solution: str) -> List[str]:
+def evaluate_guess(
+    guess: str, solution: str, impossible_digits: set = None
+) -> List[str]:
     """
     Evaluate a guess against the solution using Wordle rules.
     Returns a list of colored characters for each digit in the guess.
     Green = correct digit in correct position
     Yellow = correct digit in wrong position
+    Red = impossible digit (known to not be in solution)
     Default = wrong digit
     """
     # Remove # if present and make uppercase
     guess = guess.lstrip("#").upper()
     solution = solution.lstrip("#").upper()
+
+    if impossible_digits is None:
+        impossible_digits = set()
 
     if len(guess) != 6 or len(solution) != 6:
         return list(guess)  # Return uncolored if invalid
@@ -275,16 +281,22 @@ def evaluate_guess(guess: str, solution: str) -> List[str]:
     solution_chars = list(solution)
     guess_chars = list(guess)
 
-    # First pass: mark correct positions (green)
+    # First pass: mark impossible digits (red)
     for i in range(6):
-        if guess_chars[i] == solution_chars[i]:
-            result.append(f"\x1b[32m{guess_chars[i]}\x1b[0m")  # Green
-            solution_chars[i] = None  # Mark as used
+        if guess_chars[i] in impossible_digits:
+            result.append(f"\x1b[31m{guess_chars[i]}\x1b[0m")  # Red
             guess_chars[i] = None  # Mark as processed
         else:
             result.append(None)  # Placeholder
 
-    # Second pass: mark wrong positions (yellow)
+    # Second pass: mark correct positions (green)
+    for i in range(6):
+        if guess_chars[i] is not None and guess_chars[i] == solution_chars[i]:
+            result[i] = f"\x1b[32m{guess_chars[i]}\x1b[0m"  # Green
+            solution_chars[i] = None  # Mark as used
+            guess_chars[i] = None  # Mark as processed
+
+    # Third pass: mark wrong positions (yellow)
     for i in range(6):
         if guess_chars[i] is not None:  # Not already processed
             char = guess_chars[i]
@@ -299,9 +311,50 @@ def evaluate_guess(guess: str, solution: str) -> List[str]:
     return result
 
 
-def format_colored_hex(guess: str, solution: str) -> str:
+def get_impossible_digits(previous_guesses: List[str], solution: str) -> set:
+    """
+    Determine which digits are impossible based on previous guesses.
+    A digit is impossible if it appeared in a previous guess but got no feedback (not green or yellow).
+    """
+    impossible_digits = set()
+
+    for guess in previous_guesses:
+        guess_clean = guess.lstrip("#").upper()
+        solution_clean = solution.lstrip("#").upper()
+
+        if len(guess_clean) != 6 or len(solution_clean) != 6:
+            continue
+
+        # Track which digits in the guess got feedback
+        solution_chars = list(solution_clean)
+        guess_chars = list(guess_clean)
+
+        # Mark correct positions
+        for i in range(6):
+            if guess_chars[i] == solution_chars[i]:
+                solution_chars[i] = None  # Mark as used
+                guess_chars[i] = None  # Mark as processed
+
+        # Mark wrong positions (yellow)
+        for i in range(6):
+            if guess_chars[i] is not None:
+                char = guess_chars[i]
+                if char in solution_chars:
+                    idx = solution_chars.index(char)
+                    solution_chars[idx] = None
+                    guess_chars[i] = None  # Mark as processed
+
+        # Any remaining unprocessed digits are impossible
+        for char in guess_chars:
+            if char is not None:
+                impossible_digits.add(char)
+
+    return impossible_digits
+
+
+def format_colored_hex(guess: str, solution: str, impossible_digits: set = None) -> str:
     """Format a hex color with Wordle-style evaluation."""
-    colored_chars = evaluate_guess(guess, solution)
+    colored_chars = evaluate_guess(guess, solution, impossible_digits)
     return "#" + "".join(colored_chars)
 
 
@@ -324,12 +377,17 @@ def format_output(data: Dict) -> str:
 
     for player_name, player_data in data["players"].items():
         output.append(f"{player_name} ({player_data['moves']} moves):")
+
+        # Track impossible digits for this player
         for i, color in enumerate(player_data["guesses"], 1):
             # Two spaces with background color + reset
             color_block = f"{hex_to_ansi_bg(color)}  \x1b[0m"
 
             if solution:
-                colored_hex = format_colored_hex(color, solution)
+                # Get impossible digits from previous guesses
+                previous_guesses = player_data["guesses"][: i - 1]
+                impossible_digits = get_impossible_digits(previous_guesses, solution)
+                colored_hex = format_colored_hex(color, solution, impossible_digits)
             else:
                 colored_hex = color
 
